@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       subfolder:
-        description: 'Subfolder for documentation (e.g., docs3, docsv3, docs)'
+        description: 'Subfolder for documentation (e.g., docs3, docsv3, docs). Leave empty for root deployment.'
         required: false
-        default: 'docs3'
+        default: ''
         type: string
 
 # Ensure only latest deployment runs
@@ -46,86 +46,72 @@ jobs:
           echo "✅ Found branches-config.json"
           cat branches-config.json
 
-      - name: Cleanup old version folders and assets
+      - name: Cleanup everything except preserved files
         run: |
-          echo "🧹 Cleaning up old version folders and assets..."
+          echo "🧹 Cleaning up everything except preserved files..."
           
-          # Get current version folders from config
-          current_folders=$(python3 -c "import json; config=json.load(open('branches-config.json')); folders=[v.get('folder','') for v in config.get('versions',[]) if v.get('folder','')]; print(' '.join(folders))")
-          
-          echo "📋 Current version folders: $current_folders"
-          
-          # Define asset types that will be regenerated
-          asset_types=(
-            "style.css"
-            "images"
-            "img" 
-            "logo"
-            "favicon.ico"
-            "favicon.png"
-            "snippets"
+          # Define files/folders to preserve during cleanup
+          preserve_items=(
+            ".gitignore"
+            ".vale.ini"
+            "branches-config.json"
+            "README.md"
+            ".github"
+            ".devcontainer"
+            ".vale"
+            "scripts"
+            ".git"
           )
           
-          # Remove old assets (they'll be regenerated from current versions)
-          echo "🎨 Cleaning up old assets..."
-          for asset in "${asset_types[@]}"; do
-            if [ -e "$asset" ]; then
-              echo "🗑️  Removing old asset: $asset"
-              rm -rf "$asset"
-            fi
-          done
+          echo "📋 Files/folders to preserve:"
+          printf '%s\n' "${preserve_items[@]}"
           
-          # Remove old docs.json (will be regenerated)
-          if [ -f "docs.json" ]; then
-            echo "🗑️  Removing old docs.json"
-            rm -f "docs.json"
-          fi
-          
-          # Also clean up the subfolder if it exists (using input parameter)
-          SUBFOLDER="${{ inputs.subfolder || 'docs3' }}"
-          if [ -n "$SUBFOLDER" ] && [ -d "$SUBFOLDER" ]; then
-            echo "🗑️  Removing old $SUBFOLDER subfolder"
-            rm -rf "$SUBFOLDER"
-          fi
-          
-          # Remove old version folders that aren't in the current config
-          # Look for directories that look like version folders (numeric or version-like names)
-          for dir in */; do
-            if [ -d "$dir" ]; then
-              dir_name=${dir%/}  # Remove trailing slash
-          
-              # Skip non-version directories
-              if [[ "$dir_name" =~ ^\..*$ ]] || [ "$dir_name" = ".github" ]; then
-                continue
-              fi
-          
-              # Check if this folder is in current config
-              is_current=false
-              for current in $current_folders; do
-                if [ "$dir_name" = "$current" ]; then
-                  is_current=true
+          # Clean everything (files and directories) except preserved items
+          echo "🗑️  Removing all content except preserved items..."
+          for item in *; do
+            if [ -e "$item" ]; then
+              # Check if this item should be preserved
+              should_preserve=false
+              for preserve_item in "${preserve_items[@]}"; do
+                if [ "$item" = "$preserve_item" ]; then
+                  should_preserve=true
                   break
                 fi
               done
-          
-              # If it's not in current config and looks like a version folder, remove it
-              if [ "$is_current" = false ]; then
-                # Only remove if it looks like a version folder (contains numbers/dots or common version patterns)
-                if [[ "$dir_name" =~ ^[0-9]+\.[0-9]+$ ]] || [[ "$dir_name" =~ ^v[0-9] ]] || [[ "$dir_name" =~ ^[0-9] ]]; then
-                  echo "🗑️  Removing old version folder: $dir_name"
-                  rm -rf "$dir"
-                else
-                  echo "📁 Keeping non-version directory: $dir_name"
-                fi
+              
+              if [ "$should_preserve" = false ]; then
+                echo "  🗑️  Removing: $item"
+                rm -rf "$item"
               else
-                echo "📁 Keeping current version folder: $dir_name (will be refreshed)"
+                echo "  📁 Preserving: $item"
+              fi
+            fi
+          done
+          
+          # Also clean hidden files/directories (except preserved ones)
+          for item in .[^.]*; do
+            if [ -e "$item" ]; then
+              # Check if this item should be preserved
+              should_preserve=false
+              for preserve_item in "${preserve_items[@]}"; do
+                if [ "$item" = "$preserve_item" ]; then
+                  should_preserve=true
+                  break
+                fi
+              done
+              
+              if [ "$should_preserve" = false ]; then
+                echo "  🗑️  Removing hidden: $item"
+                rm -rf "$item"
+              else
+                echo "  📁 Preserving hidden: $item"
               fi
             fi
           done
           
           echo "✅ Cleanup completed!"
           echo "📁 Remaining files after cleanup:"
-          ls -la | grep -E "^[d-]" | head -10
+          ls -la | head -10
 
       - name: Clone and organize branches
         run: |
@@ -133,60 +119,103 @@ jobs:
           
           echo "🔄 Starting branch cloning and organization..."
           
-          # Read the branches config and extract branch information
-          branches=$(python3 -c "import json; config=json.load(open('branches-config.json')); [print(f\"{v.get('folder','')}:{v.get('branch','main')}\") for v in config.get('versions',[]) if v.get('folder','')]")
+          # Process each version from branches-config.json
+          python3 -c "
+          import json
+          import sys
+          
+          config = json.load(open('branches-config.json'))
+          versions = config.get('versions', [])
+          
+          for v in versions:
+              branch = v.get('branch', 'main')
+              is_latest = v.get('isLatest', False)
+              folder = v.get('folder', '')
+              
+              # Skip external versions
+              if v.get('isExternal', False):
+                  continue
+                  
+              if is_latest:
+                  # Latest goes to root
+                  print(f'root:{branch}')
+              elif folder:
+                  # Non-latest with folder goes to that folder
+                  print(f'{folder}:{branch}')
+          " > branch_list.txt
           
           echo "📋 Branches to process:"
-          echo "$branches"
+          cat branch_list.txt
           
-          # Clone each branch into its respective folder
-          for branch_info in $branches; do
-            if [ -n "$branch_info" ]; then
-              folder=$(echo $branch_info | cut -d':' -f1)
-              branch=$(echo $branch_info | cut -d':' -f2)
-          
-              echo "📂 Processing $folder from branch $branch..."
-          
-              # Remove existing folder if it exists
-              if [ -d "$folder" ]; then
-                echo "🗑️  Removing existing $folder/"
-                rm -rf "$folder"
-              fi
-          
+          # Process each branch
+          while IFS=':' read -r target_dir branch_name; do
+            if [ -n "$target_dir" ] && [ -n "$branch_name" ]; then
+              echo "📂 Processing $target_dir from branch $branch_name..."
+              
               # Create temporary directory for this branch
-              temp_dir="temp_$folder"
-          
+              temp_dir="temp_${target_dir}_${branch_name}"
+              
               # Clone the specific branch
-              echo "⬇️  Cloning branch $branch into $temp_dir..."
-              git clone --single-branch --branch "$branch" --depth 1 \
+              echo "⬇️  Cloning branch $branch_name into $temp_dir..."
+              git clone --single-branch --branch "$branch_name" --depth 1 \
                 "https://github.com/${{ github.repository }}.git" "$temp_dir"
-          
-              # Move the contents (excluding .git) to the target folder
-              mkdir -p "$folder"
-              echo "📁 Moving contents from $temp_dir to $folder..."
-          
-              # Copy documentation content only, excluding development/build files
-              # Excluded: .git, scripts/, branches-config.json, .github/, README.md, .gitignore, .devcontainer/
-              find "$temp_dir" -mindepth 1 -maxdepth 1 \
-                ! -name '.git' \
-                ! -name 'scripts' \
-                ! -name 'branches-config.json' \
-                ! -name '.github' \
-                ! -name 'README.md' \
-                ! -name '.gitignore' \
-                ! -name '.devcontainer' \
-                -exec cp -r {} "$folder/" \;
-          
+              
+              if [ "$target_dir" = "root" ]; then
+                # For root (latest), copy directly to current directory
+                echo "📁 Moving contents from $temp_dir to root..."
+                
+                # Copy documentation content only, excluding development/build files
+                find "$temp_dir" -mindepth 1 -maxdepth 1 \
+                  ! -name '.git' \
+                  ! -name 'scripts' \
+                  ! -name 'branches-config.json' \
+                  ! -name '.github' \
+                  ! -name 'README.md' \
+                  ! -name '.gitignore' \
+                  ! -name '.devcontainer' \
+                  ! -name '.vale' \
+                  -exec cp -r {} . \;
+                  
+                echo "✅ Successfully organized root from branch $branch_name"
+                echo "📋 Contents of root:"
+                ls -la | head -10
+              else
+                # For non-root, create the target directory and copy there
+                echo "📁 Moving contents from $temp_dir to $target_dir..."
+                
+                # Remove existing folder if it exists
+                if [ -d "$target_dir" ]; then
+                  echo "🗑️  Removing existing $target_dir/"
+                  rm -rf "$target_dir"
+                fi
+                
+                # Create target directory
+                mkdir -p "$target_dir"
+                
+                # Copy documentation content only, excluding development/build files
+                find "$temp_dir" -mindepth 1 -maxdepth 1 \
+                  ! -name '.git' \
+                  ! -name 'scripts' \
+                  ! -name 'branches-config.json' \
+                  ! -name '.github' \
+                  ! -name 'README.md' \
+                  ! -name '.gitignore' \
+                  ! -name '.devcontainer' \
+                  ! -name '.vale' \
+                  -exec cp -r {} "$target_dir/" \;
+                  
+                echo "✅ Successfully organized $target_dir from branch $branch_name"
+                echo "📋 Contents of $target_dir:"
+                ls -la "$target_dir/" | head -10
+              fi
+              
               # Clean up temp directory
               rm -rf "$temp_dir"
-          
-              echo "✅ Successfully organized $folder from branch $branch"
-          
-              # Show what was copied
-              echo "📋 Contents of $folder:"
-              ls -la "$folder/" | head -10
             fi
-          done
+          done < branch_list.txt
+          
+          # Clean up the branch list file
+          rm -f branch_list.txt
           
           echo "🎉 All branches cloned and organized!"
 
@@ -194,18 +223,33 @@ jobs:
         run: |
           echo "🔄 Running documentation merger..."
           
-          # Get subfolder from input (with fallback)
-          SUBFOLDER="${{ inputs.subfolder || 'docs3' }}"
-          echo "📁 Using subfolder: $SUBFOLDER"
+          # Handle subfolder parameter properly
+          # Distinguish between: no parameter, empty string, and specific value
+          if [ -z "${{ github.event.inputs.subfolder }}" ]; then
+            # No parameter provided - merge to root (no subfolder)
+            USE_SUBFOLDER=false
+            echo "📁 No subfolder parameter provided - merging to root"
+          elif [ "${{ github.event.inputs.subfolder }}" = "" ]; then
+            # Empty string provided - merge to root (no subfolder)  
+            USE_SUBFOLDER=false
+            echo "📁 Empty subfolder parameter provided - merging to root"
+          else
+            # Specific folder provided - use it
+            SUBFOLDER="${{ github.event.inputs.subfolder }}"
+            USE_SUBFOLDER=true
+            echo "📁 Using subfolder: $SUBFOLDER"
+          fi
           
-          # Run the merge script with branches config
-          if [ -n "$SUBFOLDER" ]; then
+          # Run the merge script with or without subfolder parameter
+          if [ "$USE_SUBFOLDER" = true ]; then
+            echo "🔧 Running merge with subfolder: $SUBFOLDER"
             python3 scripts/merge_docs_configs.py \
               --branches-config branches-config.json \
               --base-dir . \
               --subfolder "$SUBFOLDER" \
               --output docs.json
           else
+            echo "🔧 Running merge to root (no subfolder parameter passed)"
             python3 scripts/merge_docs_configs.py \
               --branches-config branches-config.json \
               --base-dir . \
@@ -275,7 +319,7 @@ jobs:
             - ✅ Cleaned up outdated version folders
             
             ### Subfolder Used:
-            `${{ inputs.subfolder || 'docs3' }}`
+            `${{ github.event.inputs.subfolder || 'root (no subfolder)' }}`
             
             ---
             
